@@ -1,8 +1,3 @@
-from collections import Counter
-import math
-import dgl
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from core.multimodal_dataset import MultiModalDataSet
 from helper import io_util
 import json
@@ -18,16 +13,17 @@ class EventProcess():
         self.logger = logger
         self.embedding_dim = args.embedding_dim
         self.dataset = args.dataset
+        self.labels_file = args.labels_file
 
     def process(self, reconstruct=False):
         self.data_path = f"data/{self.dataset}"
 
-        label_path = f"data/{self.dataset}/label.csv"
-        metric_path = f"data/{self.dataset}/raw/metric.json"
-        trace_path = f"data/{self.dataset}/raw/trace.json"
-        log_path = f"data/{self.dataset}/raw/log.json"
-        edge_path = f"data/{self.dataset}/raw/edges.pkl"
-        node_path = f"data/{self.dataset}/raw/nodes.pkl"
+        label_path = f"data/{self.dataset}/{self.labels_file}"
+        metric_path = f"data/{self.dataset}/events/metric.json"
+        trace_path = f"data/{self.dataset}/events/trace.json"
+        log_path = f"data/{self.dataset}/events/log.json"
+        edge_path = f"data/{self.dataset}/events/edges.pkl"
+        node_path = f"data/{self.dataset}/events/nodes.pkl"
 
         self.logger.info(f"Load raw events from {self.dataset} dataset")
         self.labels = pd.read_csv(label_path)
@@ -54,15 +50,9 @@ class EventProcess():
         # log event: (instance, eventId)
 
         data_map = {'metric': self.metrics, 'trace': self.traces, 'log': self.logs}
-        # data_map = {'trace': self.traces}
-        
         
         for key, data in data_map.items():
             encoder = FastTextEncoder(key, self.nodes, self.types, embedding_dim=self.embedding_dim, epochs=5)
-            # encoder = LDAEncoder(num_topics=self.args.embedding_dim)
-            # encoder = CNNW2VEncoder(
-            #     seq_hidden=self.args.seq_hidden,
-            #     embedding_dim=self.args.embedding_dim)
 
             train_idxs = self.labels[self.labels['data_type']=='train']['index'].values.tolist()
             train_ins_labels = self.labels[self.labels['data_type']=='train']['instance'].values.tolist()
@@ -98,12 +88,40 @@ class EventProcess():
                 embs.append(graph_embs)
             io_util.save(f"data/{self.dataset}/tmp/{key}.pkl", np.array(embs))
 
+        # calculate edge-features for traces
+        edge_feats = []
+        trace_err_labels = {item[2] for lists in self.traces.values() for item in lists}
+        trace_err_labels = sorted(list(trace_err_labels)) # e.g. [400, 500, "PD"]
+
+        for idx in self.labels['index']:
+            trace_errs = self.traces[str(idx)] # e.g. [['redisservice1', 'logservice2', 'PD'], ...]
+            graph_edge_feats = []
+            for src, dst in zip(self.edges[0], self.edges[1]):
+                src_instance = self.nodes[src]
+                dst_instance = self.nodes[dst]
+                
+                edge_errs = [err for err in trace_errs if err[1] == src_instance and err[0] == dst_instance]
+
+                # trace_err_labels=[ 400, 500, PD ] --> 400 and PD occurs --> edge_feat=[1, 0, 1]
+                edge_feat = np.zeros(len(trace_err_labels), dtype=np.float32)
+                for i, label in enumerate(trace_err_labels):
+                    if any(label in edge[2] for edge in edge_errs):
+                        edge_feat[i] = 1
+
+                graph_edge_feats.append(np.array([np.sum(edge_feat)])) # it will be ignored
+                #graph_edge_feats.append(edge_feat)
+            edge_feats.append(graph_edge_feats)
+
+        edge_feats = np.array(edge_feats)
+        io_util.save(f"data/{self.dataset}/tmp/trace-edge.pkl", np.array(edge_feats))
+
 
     def build_dataset(self):
         self.logger.info(f"Build dataset for training")
         metric_embs = io_util.load(f"data/{self.dataset}/tmp/metric.pkl")
         trace_embs = io_util.load(f"data/{self.dataset}/tmp/trace.pkl")
         log_embs = io_util.load(f"data/{self.dataset}/tmp/log.pkl")
+        trace_edge_feats = io_util.load(f"data/{self.dataset}/tmp/trace-edge.pkl")
 
         label_types = ['anomaly_type', 'instance']
         label_dict = {label_type: None for label_type in label_types}
@@ -116,20 +134,21 @@ class EventProcess():
         train_metric_Xs = metric_embs[train_index]
         train_trace_Xs = trace_embs[train_index]
         train_log_Xs = log_embs[train_index]
-        # train_service_labels = label_dict['service'][train_index]
+        train_trace_edge_Xs = trace_edge_feats[train_index]
         train_instance_labels = label_dict['instance'][train_index]
         train_type_labels = label_dict['anomaly_type'][train_index]
 
         test_metric_Xs = metric_embs[test_index]
         test_trace_Xs = trace_embs[test_index]
         test_log_Xs = log_embs[test_index]
-        # test_service_labels = label_dict['service'][test_index]
+        test_trace_edge_Xs = trace_edge_feats[test_index]
         test_instance_labels = label_dict['instance'][test_index]
         test_type_labels = label_dict['anomaly_type'][test_index]
         
         train_data = MultiModalDataSet(train_metric_Xs, 
                                        train_trace_Xs, 
-                                       train_log_Xs, 
+                                       train_log_Xs,
+                                       train_trace_edge_Xs,
                                        train_instance_labels,
                                        train_type_labels, 
                                        self.nodes, 
@@ -137,39 +156,16 @@ class EventProcess():
         test_data = MultiModalDataSet(test_metric_Xs, 
                                       test_trace_Xs, 
                                       test_log_Xs, 
+                                      test_trace_edge_Xs,
                                       test_instance_labels, 
                                       test_type_labels, 
                                       self.nodes, 
                                       self.edges)
 
-        # graph augmentation
-        # if self.args.aug_percent > 0:
-        #     # filter samples with lower count
-        #     unique_roots, root_counts = np.unique(train_instance_labels, return_counts=True)
-        #     unique_types, type_counts = np.unique(train_type_labels, return_counts=True)
-        #     aug_root_num = int(self.args.aug_percent * len(unique_roots))
-        #     aug_type_num = int(self.args.aug_percent * len(unique_types))
-        #     rare_roots = unique_roots[root_counts <= np.sort(root_counts)[:aug_root_num][-1]]
-        #     rare_types = unique_types[type_counts <= np.sort(type_counts)[:aug_type_num][-1]]
-
-        #     aug_data = []
-        #     for (graph, (root, type)) in train_data:
-        #         if root in rare_roots or type in rare_types:
-        #             aug_graph1 = aug_drop_node(graph, root, drop_percent=0.2)
-        #             aug_graph2 = aug_loss_modality(graph, drop_percent=0.2)
-        #             # aug_graph3 = aug_random_walk(graph, root, drop_percent=0.2)
-        #             aug_data.append((aug_graph1, (root, type)))
-        #             aug_data.append((aug_graph2, (root, type)))
-        #             # aug_data.append((aug_graph3, (root, type)))           
-        #     train_data.data.extend(aug_data)
-
         aug_data = []
         for (graph, (root, type)) in train_data:
             aug_graph = aug_drop_node(graph, root, drop_percent=self.args.aug_percent)
-            # aug_graph2 = aug_loss_modality(graph, drop_percent=0.2)
-            # aug_graph3 = aug_random_walk(graph, root, drop_percent=0.2)
-            aug_data.append((aug_graph, (root, type)))
-            # aug_data.append((aug_graph3, (root, type)))           
+            aug_data.append((aug_graph, (root, type))) 
         train_data.data.extend(aug_data)        
         return train_data, test_data
 
