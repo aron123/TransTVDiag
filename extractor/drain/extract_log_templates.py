@@ -1,12 +1,5 @@
-# -*- coding: utf-8 -*-
-
-"""
-    抽取日志模板信息。
-"""
-
 import os
 import drain3
-import pandas as pd
 from tqdm import tqdm
 
 from drain3 import TemplateMiner
@@ -68,7 +61,6 @@ def extract_templates(log_list: list, save_pth: str):
 
 
 def match_template(miner: drain3.TemplateMiner, log_list: list):
-    # logger = get_logger("logs_matching")
     IDs = []
     templates = []
     params = []
@@ -76,9 +68,7 @@ def match_template(miner: drain3.TemplateMiner, log_list: list):
     for log in tqdm(log_list):
         cluster = miner.match(log)
         
-        # logger.debug('match log: {}'.format(log))
         if cluster is None:
-            # logger.debug("No match found")
             IDs.append(None)
             templates.append(None)
             
@@ -89,10 +79,5 @@ def match_template(miner: drain3.TemplateMiner, log_list: list):
             IDs.append(cluster.cluster_id)
             templates.append(template)
             params.append(param)
-            # logger.debug(f"Matched template #{cluster.cluster_id}: {template}")
-
-            # params = miner.get_parameter_list(template, log)
-            # logger.debug(f"Parameters: {params}")
-        # logger.debug("===========================================================================================")
 
     return IDs, templates, params

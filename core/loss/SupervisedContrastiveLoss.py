@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -13,7 +14,6 @@ class SupConLoss(nn.Module):
 
     def forward(self, embeddings, labels):
         n = labels.shape[0]  # batch
-        # similarity_matrix = torch.matmul(features, features.T)
         similarity_matrix = F.cosine_similarity(embeddings.unsqueeze(1), embeddings.unsqueeze(0), dim=2)
 
         mask = torch.ones_like(similarity_matrix) * (labels.expand(n, n).eq(labels.expand(n, n).t()))
@@ -35,7 +35,8 @@ class SupConLoss(nn.Module):
 
         loss = torch.sum(torch.sum(loss_partial, dim=1)) / (len(torch.nonzero(loss_partial)))
 
+        if (math.isnan(loss)):
+            return 0
+
         return loss
-
-
-
+    

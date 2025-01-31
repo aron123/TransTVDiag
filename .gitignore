@@ -1,0 +1,7 @@
+*.pyc
+data/gaia/csv
+data/gaia/pkl
+data/gaia/tmp
+data/gaia/events/metric.json
+logs/
+tmp/
